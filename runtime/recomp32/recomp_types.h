@@ -1437,12 +1437,13 @@ RECOMP_WEAK void (*recomp_trap_hook)(uint32_t code, uint32_t va);
 /* Indirect tail call (jmp through dispatch) */
 /* The report out of line: an fprintf inside the macro gives every lifted
  * function a stack frame to pop after the call, so the call is no longer a
- * tail call. Native compilers jump anyway; wasm (-mtail-call) does not, and a
- * loop split across functions then overflows the browser's stack. */
+ * tail call. MSVC sibling-calls the fallback; wasm needs clang musttail
+ * (-mtail-call). gcc 15+ has musttail too but rejects it in any function that
+ * contains setjmp (RECOMP_EH_FRAME), so Linux hosts should build with clang:
+ * without a real jmp, THIS_COD's ITAIL chains overflow the C stack. */
 /* A lifted RECOMP_ITAIL is always followed by a return (lift32, generate),
- * so the call may return for it: clang's musttail makes it a jump, which wasm
- * needs (-mtail-call) and native code gets anyway. The registers are already
- * out, so skipping the caller's RECOMP_REGS_IN/OUT changes nothing. */
+ * so the call may return for it. The registers are already out, so skipping
+ * the caller's RECOMP_REGS_IN/OUT changes nothing. */
 #if defined(__clang__) && defined(__has_attribute)
 #if __has_attribute(musttail)
 #define RECOMP_TAIL_CALL(fn) __attribute__((musttail)) return (fn)()

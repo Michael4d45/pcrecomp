@@ -34,6 +34,7 @@ typedef struct {
     int win, is555;                                      /* draws into the window surface; 16bpp is 5-5-5 */
     const uint32_t *ctab;                                /* an 8bpp DIB's colour table, 0x00RRGGBB */
     const uint32_t *pe_live;                             /* DirectDraw PALETTEENTRY[256], live (softdd sync) */
+    int surface;                                        /* hle_gdi_surface_dc*: do not SelectObject a bitmap over px */
     uint32_t bmp;                                        /* the bitmap selected into it */
     int clip, cl, ct, cr, cb;                            /* SelectClipRgn's rectangle, in pixels */
 } dc_t;
@@ -72,6 +73,7 @@ uint32_t hle_gdi_surface_dc_pal(uint8_t *px, int w, int h, int pitch, int bpp, c
     if (!x) return d;
     x->px = px, x->w = w, x->h = h, x->pitch = pitch, x->bpp = bpp;
     if (bpp == 8) x->pe_live = pe;
+    x->surface = 1;
     return d;
 }
 void hle_gdi_release_dc(uint32_t h) { dc_t *x = DC(h); if (x) x->used = 0; }
@@ -223,7 +225,20 @@ const char *hle_font_file(const char *face, int bold, int italic) {
         size_t n = fread(path, 1, sizeof path - 1, p);
         pclose(p);
         path[n] = 0;
+        while (n && (path[n-1] == '\n' || path[n-1] == '\r')) path[--n] = 0;
         if (n && access(path, R_OK) == 0) return path;
+        /* fc-match on some hosts prints only the basename */
+        if (n && !strchr(path, '/')) {
+            static const char *const fc_dirs[] = {
+                "/usr/share/fonts/liberation/", "/usr/share/fonts/truetype/liberation/",
+                "/usr/share/fonts/truetype/liberation2/", "/usr/share/fonts/TTF/", NULL };
+            char base[256];
+            snprintf(base, sizeof base, "%s", path);
+            for (int i = 0; fc_dirs[i]; i++) {
+                snprintf(path, sizeof path, "%s%s", fc_dirs[i], base);
+                if (access(path, R_OK) == 0) return path;
+            }
+        }
     }
     static const char *const dirs[] = { "/usr/share/fonts/truetype/liberation/", "/usr/share/fonts/truetype/liberation2/",
                                         "/usr/share/fonts/liberation/", "/usr/share/fonts/liberation-sans/",
@@ -458,8 +473,11 @@ static void g_SelectObject(void) {                       /* (hdc, obj) -> the pr
     if (d && g && g->type == GO_PEN)   { old = d->pen ? d->pen : stock(7);   d->pen = o;   RET(old, 2); }
     if (d && g && g->type == GO_BITMAP) {                /* select a bitmap into a memory DC */
         old = d->bmp ? d->bmp : stock(0);
-        d->px = g->px, d->w = g->w, d->h = g->h, d->pitch = g->pitch, d->bpp = g->bpp;
-        d->is555 = g->is555, d->ctab = g->pal, d->bmp = o, d->win = 0;
+        if (!d->surface) {                               /* a compose/surface DC keeps its pixels */
+            d->px = g->px, d->w = g->w, d->h = g->h, d->pitch = g->pitch, d->bpp = g->bpp;
+            d->is555 = g->is555, d->ctab = g->pal, d->win = 0;
+        }
+        d->bmp = o;
         RET(old, 2);
     }
     RET(stock(0), 2);

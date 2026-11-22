@@ -467,10 +467,12 @@ static void present(int flip) {
     }
 }
 
-/* Who shows the cursor. A DirectDraw game draws its own into the picture, so
- * by default the window has none. A game whose menus are Win32 dialogs (Red
- * Alert 2) uses the Windows cursor there: its host's hook says when, and the
- * window shows the cursor the game set, built from its resources. */
+/* Who shows the cursor. ShowCursor's display count is the Windows rule: when
+ * the count is not negative the host shows the cursor the guest SetCursor'd
+ * (from its resources, or the system arrow). A DirectDraw game that draws its
+ * own into the primary calls ShowCursor(FALSE) first; until then a softdd-style
+ * host must show the pointer or the menu has none and clicks aim blind.
+ * hle_screen_cursor_hook, if set, overrides (Red Alert 2's Win32 menus). */
 int (*hle_screen_cursor_hook)(void);
 int (*hle_screen_key_hook)(int sdl_scancode, int down);
 void (*hle_screen_poll_hook)(void);
@@ -493,8 +495,10 @@ static void update_cursor(void) {
     static int was_shown = 0;
     static uint32_t was_handle;
     static SDL_Cursor *made;
-    int show = g_menu_depth || (hle_screen_cursor_hook && hle_screen_cursor_hook());
-    uint32_t handle = g_menu_depth ? 0 : hle_current_cursor();   /* over a menu, the system arrow */
+    int show;
+    if (hle_screen_cursor_hook) show = g_menu_depth || hle_screen_cursor_hook();
+    else show = g_menu_depth || hle_cursor_shown();
+    uint32_t handle = g_menu_depth ? 0 : hle_current_cursor();   /* over a host menu, the system arrow */
     if (show == was_shown && (!show || handle == was_handle)) return;
     if (show && handle != was_handle) {
         const hle_cursor_image_t *img = hle_cursor_image(handle);
@@ -817,7 +821,10 @@ static void confine_update(void) {
     int want = g_confine && !g_released && !g_menu_depth && g_dst.w > 0 && g_dst.h > 0
                && (SDL_GetWindowFlags(g_win) & SDL_WINDOW_INPUT_FOCUS);
     SDL_Rect r = want ? to_points(g_dst) : (SDL_Rect){ 0, 0, 0, 0 };
-    int rel = want && g_want_rel;
+    /* Relative only when the guest hid the cursor (ShowCursor count < 0). With
+     * a visible host pointer, absolute SDL coords must match what the user
+     * aims at — else menu clicks chime on hover and miss the button. */
+    int rel = want && g_want_rel && !hle_cursor_shown();
     if (rel != g_rel) {
         SDL_SetRelativeMouseMode(rel ? SDL_TRUE : SDL_FALSE);
         g_rel = rel, g_rel_fx = g_rel_fy = 0;
@@ -949,17 +956,17 @@ static void warp(int x, int y) {
 }
 
 /* The game drew into the primary. On the window's thread, show it (present
- * keeps to 60 a second, except a flip, which is always shown), and keep the
- * window's own events moving: a load
- * that does not pump for seconds would otherwise look hung to the desktop
- * (macOS's spinning cursor). The events wait in SDL's queue for the pump. */
+ * keeps to ~60 a second, except a flip, which is always shown), and keep the
+ * window's own events moving: a load that does not pump for seconds would
+ * otherwise look hung to the desktop (macOS's spinning cursor). Pump every
+ * time — during a selection drag the game Blts often and barely PeekMessages;
+ * waiting 100 ms to pull SDL mouse moves is visible lag. */
 static void primary_changed(void) {
-    static uint32_t last_events;
     if (!g_ren || !pthread_equal(pthread_self(), g_video_thread)) return;
     uint32_t now = hle_ticks_ms();
     int flip = hle_dd_flipping();
     if (!flip && now - g_last_present < 15) return;
-    if (now - last_events >= 100) SDL_PumpEvents(), last_events = now;
+    SDL_PumpEvents();
     present(flip);
 }
 
@@ -992,8 +999,17 @@ int hle_screen_open(const char *title, int fullscreen, int headless) {
      * framebuffer, which SDL hands to the canvas from the page's thread. */
     g_ren = SDL_CreateRenderer(g_win, -1, SDL_RENDERER_SOFTWARE);
 #else
-    g_ren = SDL_CreateRenderer(g_win, -1, SDL_RENDERER_PRESENTVSYNC);
-    if (!g_ren) g_ren = SDL_CreateRenderer(g_win, -1, SDL_RENDERER_SOFTWARE);
+    /* No PRESENTVSYNC: present() already caps ~60 Hz, and a vsync wait on the
+     * game thread during primary Blts (selection drag, etc.) stalls the
+     * message pump so mouse moves feel late. HLE_VSYNC=1 restores it. */
+    {
+        const char *vs = getenv("HLE_VSYNC");
+        Uint32 flags = (vs && vs[0] != '0') ? SDL_RENDERER_PRESENTVSYNC : SDL_RENDERER_ACCELERATED;
+        g_ren = SDL_CreateRenderer(g_win, -1, flags);
+        if (!g_ren && !(flags & SDL_RENDERER_PRESENTVSYNC))
+            g_ren = SDL_CreateRenderer(g_win, -1, SDL_RENDERER_PRESENTVSYNC);
+        if (!g_ren) g_ren = SDL_CreateRenderer(g_win, -1, SDL_RENDERER_SOFTWARE);
+    }
 #endif
     if (!g_ren) { fprintf(stderr, "[screen] renderer: %s\n", SDL_GetError()); return -1; }
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");

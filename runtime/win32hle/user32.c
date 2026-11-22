@@ -787,6 +787,20 @@ void hle_input_key(int down, uint32_t vk, uint32_t scan) {
     if (vk == 0xA4 || vk == 0xA5) { if (down) g_keys[VK_MENU] |= 0x80; else g_keys[VK_MENU] &= 1; }
     uint32_t t = hle_focus_window();
     int alt = (g_keys[VK_MENU] & 0x80) != 0;
+    /* Genie's New Player (and similar) EDIT is subclassed and eats VK_RETURN
+     * without accepting the dialog. A real click on OK works; turn Enter into
+     * that click for a single-line field (ES_MULTILINE keeps the key). */
+    win_t *fe = W(t);
+    if (down && vk == VK_RETURN && fe && fe->kind == K_EDIT && !(fe->style & 4u) && visible(fe)) {
+        int ox, oy;
+        origin(fe, &ox, &oy);
+        int cx = ox - 20, cy = oy + fe->h + 45;          /* OK under Genie name dialogs */
+        if (cx < 0) cx = ox + fe->w / 4;
+        if (cy >= g_screen_h) cy = oy + fe->h + 20;
+        hle_input_mouse(WM_LBUTTONDOWN, cx, cy);
+        hle_input_mouse(WM_LBUTTONUP, cx, cy);
+        return;
+    }
     /* The keys Windows marks extended (bit 24): without it a game reading
      * the scan code takes Delete for the keypad's ".", the arrows for its
      * 8 4 6 2, Home for its 7 (Theme Park World's Delete, its clear-land tool). */
@@ -967,16 +981,14 @@ static uint32_t static_proc(win_t *x, uint32_t m, uint32_t w, uint32_t l) {
     }
 }
 
-/* Paint an EDIT into hdc (client origin). softdd's WM_PRINT compose, and
- * WM_PAINT when a window surface exists. Parent's WM_CTLCOLOREDIT sets the
- * colours on the DC; default is white text on black. */
+/* Paint an EDIT into hdc (client origin). White on black — Genie's
+ * WM_CTLCOLOREDIT would SelectObject the compose DC and clear its pixels. */
 static void paint_edit(win_t *x, uint32_t hdc) {
     if (!hdc || !x) return;
-    hle_gdi_set_text_color(hdc, 0x00FFFFFFu);
-    hle_gdi_set_bk_color(hdc, 0x00000000u);
+    uint32_t ink = 0x00FFFFFFu, paper = 0x00000000u;
+    hle_gdi_set_text_color(hdc, ink);
+    hle_gdi_set_bk_color(hdc, paper);
     hle_gdi_set_bk_mode(hdc, 2);                         /* OPAQUE */
-    if (x->parent) hle_send(x->parent, WM_CTLCOLOREDIT, hdc, x->hwnd);
-    uint32_t ink = hle_gdi_get_text_color(hdc), paper = hle_gdi_get_bk_color(hdc);
     hle_gdi_fill(hdc, 0, 0, x->w, x->h, paper);
     if (x->font) hle_gdi_select_font(hdc, x->font);
     hle_gdi_set_bk_mode(hdc, 1);                         /* TRANSPARENT over the fill */
@@ -989,7 +1001,10 @@ static void paint_edit(win_t *x, uint32_t hdc) {
         if (sw < 1) sw = 1;
         hle_gdi_fill(hdc, pad + s0w, 1, pad + s0w + sw, x->h - 1, ink);
     }
-    hle_gdi_text_out(hdc, pad, 1, x->text);
+    if (!hle_gdi_text_out(hdc, pad, 1, x->text) && x->text[0]) {
+        hle_gdi_select_font(hdc, 0);
+        hle_gdi_text_out(hdc, pad, 1, x->text);
+    }
     /* Caret: blinking at sel0 (softdd draws it after WM_PRINT). */
     if (g_focus == x->hwnd) {
         uint32_t blink = 530;
@@ -1001,6 +1016,13 @@ static void paint_edit(win_t *x, uint32_t hdc) {
         }
     }
 }
+/* Compose path: paint without the guest subclass (it SelectObject's the
+ * WM_PRINT DC and clears px before CallWindowProc reaches us). */
+void hle_paint_edit(uint32_t hwnd, uint32_t hdc) {
+    win_t *x = W(hwnd);
+    if (x && x->kind == K_EDIT) paint_edit(x, hdc);
+}
+
 static void edit_changed(win_t *x) {
     invalidate(x, 0);
     /* Typing does not touch the primary; wake the presenter so compose runs. */
@@ -1044,6 +1066,7 @@ static uint32_t edit_proc(win_t *x, uint32_t m, uint32_t w, uint32_t l) {
         else if (w == 0x24) x->sel0 = x->sel1 = 0;
         else if (w == 0x23) x->sel0 = x->sel1 = n;
         else if (w == 0x2E && x->sel0 < n) { memmove(x->text + x->sel0, x->text + x->sel0 + 1, (size_t)(n - x->sel0)); notify(x, 0x0300u); }
+        else return 0;
         edit_changed(x);
         return 0;
     }
@@ -1781,7 +1804,8 @@ static void u_SetWindowLongA(void) {
         RET(old, 3);
     }
     switch (i) {
-    case GWL_WNDPROC: x->proc = v; break;
+    case GWL_WNDPROC:
+        x->proc = v; break;
     case GWL_HINSTANCE: x->hinst = v; break;
     case GWL_HWNDPARENT: if (x->parent) x->parent = v; else x->owner = v; break;
     case GWL_ID: x->id = v; break;
@@ -1843,7 +1867,11 @@ static void move(win_t *x, int px, int py, int pw, int ph, int do_move, int do_s
     if (do_size) hle_send(h, WM_SIZE, 0, (uint32_t)(x->h & 0xFFFF) << 16 | (uint32_t)(x->w & 0xFFFF));
     if ((x = W(h)) && do_move) hle_send(h, WM_MOVE, 0, (uint32_t)(x->y & 0xFFFF) << 16 | (uint32_t)(x->x & 0xFFFF));
 }
-static void u_MoveWindow(void) { win_t *x = W(A32(0)); if (x) move(x, (int)A32(1), (int)A32(2), (int)A32(3), (int)A32(4), 1, 1); RET(x != NULL, 6); }
+static void u_MoveWindow(void) {
+    win_t *x = W(A32(0));
+    if (x) move(x, (int)A32(1), (int)A32(2), (int)A32(3), (int)A32(4), 1, 1);
+    RET(x != NULL, 6);
+}
 /* DeferWindowPos: a frame lays its bars + client out in one batch. We have no
  * reason to defer — apply each move at once and pass the (non-null) HDWP on. */
 static void u_BeginDeferWindowPos(void) { RET(1, 1); }
