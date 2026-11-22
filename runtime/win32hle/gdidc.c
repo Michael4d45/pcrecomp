@@ -33,7 +33,7 @@ typedef struct {
     int bkmode, align, wox, woy, vox, voy, cpx, cpy;
     int win, is555;                                      /* draws into the window surface; 16bpp is 5-5-5 */
     const uint32_t *ctab;                                /* an 8bpp DIB's colour table, 0x00RRGGBB */
-    uint32_t ctab_buf[256];                              /* surface GetDC: a copy of the DD palette as RRGGBB */
+    const uint32_t *pe_live;                             /* DirectDraw PALETTEENTRY[256], live (softdd sync) */
     uint32_t bmp;                                        /* the bitmap selected into it */
     int clip, cl, ct, cr, cb;                            /* SelectClipRgn's rectangle, in pixels */
 } dc_t;
@@ -64,20 +64,14 @@ uint32_t hle_gdi_surface_dc(uint8_t *px, int w, int h, int pitch, int bpp) {
     return hle_gdi_surface_dc_pal(px, w, h, pitch, bpp, NULL);
 }
 /* pe: 256 PALETTEENTRYs (peRed, peGreen, peBlue, peFlags as a uint32 each), or
- * NULL. An 8bpp surface DC needs them so TextOut matches white/colours to the
- * game's palette instead of a grey ramp (softdd's sync_dib_palette). */
+ * NULL. Kept live so SetPaletteEntries after GetDC still match (softdd
+ * reloads the DIB table on every GetDC for the same reason). */
 uint32_t hle_gdi_surface_dc_pal(uint8_t *px, int w, int h, int pitch, int bpp, const uint32_t *pe) {
     uint32_t d = new_dc();
     dc_t *x = DC(d);
     if (!x) return d;
     x->px = px, x->w = w, x->h = h, x->pitch = pitch, x->bpp = bpp;
-    if (bpp == 8 && pe) {
-        for (int i = 0; i < 256; i++) {
-            uint32_t e = pe[i];
-            x->ctab_buf[i] = (e & 0xFFu) << 16 | (e >> 8 & 0xFFu) << 8 | (e >> 16 & 0xFFu);
-        }
-        x->ctab = x->ctab_buf;
-    }
+    if (bpp == 8) x->pe_live = pe;
     return d;
 }
 void hle_gdi_release_dc(uint32_t h) { dc_t *x = DC(h); if (x) x->used = 0; }
@@ -662,9 +656,20 @@ static void g_GetTextMetricsA(void) {                    /* TEXTMETRICA */
     RET(1, 2);
 }
 
+/* pe/ctab entry i as 0x00RRGGBB. pe_live is PALETTEENTRY; ctab is RRGGBB. */
+static uint32_t entry_rgb(const dc_t *d, int i) {
+    if (d->pe_live) {
+        uint32_t e = d->pe_live[i & 255];
+        return (e & 0xFFu) << 16 | (e >> 8 & 0xFFu) << 8 | (e >> 16 & 0xFFu);
+    }
+    if (d->ctab) return d->ctab[i & 255] & 0xFFFFFFu;
+    return (uint32_t)(i & 255) * 0x010101u;
+}
+static uint32_t from_rgb(const dc_t *d, uint32_t c);
 static uint32_t pack(const dc_t *d, uint32_t cr) {       /* COLORREF 0x00BBGGRR -> the surface's pixel */
     uint32_t r = cr & 0xFF, g = (cr >> 8) & 0xFF, b = (cr >> 16) & 0xFF;
     if (d->bpp == 16) return d->is555 ? (r >> 3) << 10 | (g >> 3) << 5 | (b >> 3) : (r >> 3) << 11 | (g >> 2) << 5 | (b >> 3);
+    if (d->bpp == 8) return from_rgb(d, r << 16 | g << 8 | b);   /* nearest palette index — not the blue byte */
     return r << 16 | g << 8 | b;
 }
 static void put(dc_t *d, int x, int y, uint32_t v) {
@@ -680,7 +685,7 @@ static uint32_t get(dc_t *d, int x, int y) {
 }
 /* A pixel as 0x00RRGGBB, and back: what a blit between depths goes through. */
 static uint32_t to_rgb(const dc_t *d, uint32_t v) {
-    if (d->bpp == 8) return d->ctab ? d->ctab[v & 0xFF] : v * 0x010101u;
+    if (d->bpp == 8) return entry_rgb(d, (int)v);
     if (d->bpp == 16) {
         uint32_t r = d->is555 ? v >> 10 & 31 : v >> 11, g = d->is555 ? (v >> 5 & 31) << 1 | (v >> 9 & 1) : v >> 5 & 63, b = v & 31;
         return (r << 3 | r >> 2) << 16 | (g << 2 | g >> 4) << 8 | (b << 3 | b >> 2);
@@ -691,12 +696,12 @@ static uint32_t from_rgb(const dc_t *d, uint32_t c) {
     uint32_t r = c >> 16 & 0xFF, g = c >> 8 & 0xFF, b = c & 0xFF;
     if (d->bpp == 16) return d->is555 ? (r >> 3) << 10 | (g >> 3) << 5 | (b >> 3) : (r >> 3) << 11 | (g >> 2) << 5 | (b >> 3);
     if (d->bpp == 8) {
-        if (!d->ctab) return (r * 77 + g * 151 + b * 28) >> 8;   /* no table: grey ramp */
-        /* Nearest palette entry (softdd / real DD surface DCs). Cached per
-         * (ctab identity, colour) would help; menus redraw rarely. */
+        if (!d->pe_live && !d->ctab) return (r * 77 + g * 151 + b * 28) >> 8;   /* grey ramp */
+        /* Nearest palette entry (softdd / real DD surface DCs). */
         int best = 0, bestd = 1 << 30;
         for (int i = 0; i < 256; i++) {
-            int cr = (int)(d->ctab[i] >> 16 & 0xFF), cg = (int)(d->ctab[i] >> 8 & 0xFF), cb = (int)(d->ctab[i] & 0xFF);
+            uint32_t e = entry_rgb(d, i);
+            int cr = (int)(e >> 16 & 0xFF), cg = (int)(e >> 8 & 0xFF), cb = (int)(e & 0xFF);
             int dr = cr - (int)r, dg = cg - (int)g, db = cb - (int)b;
             int dist = dr * dr + dg * dg + db * db;
             if (dist < bestd) { bestd = dist; best = i; if (!dist) break; }
