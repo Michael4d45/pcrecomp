@@ -784,25 +784,24 @@ static uint8_t *text_ink(const font_t *f, TTF_Font *t, const char *buf, int n, i
     return ink;
 }
 
-static void g_TextOutA(void) {                           /* (hdc, x, y, text, n) */
-    dc_t *d = DC(A32(0));
-    int n = (int)A32(4);
-    if (!d || !d->px || n <= 0 || (d->bpp != 8 && d->bpp != 16 && d->bpp != 32)) RET(1, 5);
+/* Draw n bytes of s at (x,y) in logical coords. 0 if the DC cannot. */
+static int text_out_at(dc_t *d, int x, int y, const char *s, int n) {
+    if (!d || !d->px || !s || n <= 0 || (d->bpp != 8 && d->bpp != 16 && d->bpp != 32)) return 0;
     font_t *f = FONT(d->font);
     TTF_Font *t = ttf_of(f);
-    if (!t) RET(1, 5);
+    if (!t) return 0;
     char buf[1024];
     if (n >= (int)sizeof buf) n = sizeof buf - 1;
-    memcpy(buf, APTR(3), (size_t)n), buf[n] = 0;
+    memcpy(buf, s, (size_t)n), buf[n] = 0;
     int iw, ih;
     uint8_t *ink = text_ink(f, t, buf, n, &iw, &ih);
-    if (!ink) RET(1, 5);
+    if (!ink) return 0;
     float sx = hscale(f, t);
     if (sx != 1.0f) {
         int nw = scaled(iw, sx);
         ink = ink_scale(ink, iw, ih, nw), iw = nw < 1 ? 1 : nw;
     }
-    int x = (int)A32(1) - d->wox + d->vox, y = (int)A32(2) - d->woy + d->voy;
+    x = x - d->wox + d->vox, y = y - d->woy + d->voy;
     if ((d->align & 6) == 6) x -= iw / 2;                /* TA_CENTER */
     else if (d->align & 2) x -= iw;                      /* TA_RIGHT */
     if ((d->align & 24) == 24) y -= TTF_FontAscent(t);   /* TA_BASELINE */
@@ -819,6 +818,10 @@ static void g_TextOutA(void) {                           /* (hdc, x, y, text, n)
         }
     }
     free(ink);
+    return 1;
+}
+static void g_TextOutA(void) {                           /* (hdc, x, y, text, n) */
+    text_out_at(DC(A32(0)), (int)A32(1), (int)A32(2), (const char *)APTR(3), (int)A32(4));
     RET(1, 5);
 }
 
@@ -836,6 +839,42 @@ static void rectfill(dc_t *d, int l, int t, int r, int b, uint32_t cr) {
     uint32_t v = pack(d, cr);
     for (int y = t; y < b; y++) for (int x = l; x < r; x++) put(d, x, y, v);
     if (d->win) g_win_seq++;
+}
+
+/* Host-side GDI: compose text fields into a DirectDraw frame (softdd's
+ * WM_PRINT path). Operate on a DC from hle_gdi_surface_dc_pal. */
+void hle_gdi_set_text_color(uint32_t hdc, uint32_t cr) { dc_t *d = DC(hdc); if (d) d->text = cr; }
+void hle_gdi_set_bk_color(uint32_t hdc, uint32_t cr) { dc_t *d = DC(hdc); if (d) d->bk = cr; }
+void hle_gdi_set_bk_mode(uint32_t hdc, int mode) { dc_t *d = DC(hdc); if (d) d->bkmode = mode; }
+uint32_t hle_gdi_get_text_color(uint32_t hdc) { dc_t *d = DC(hdc); return d ? d->text : 0; }
+uint32_t hle_gdi_get_bk_color(uint32_t hdc) { dc_t *d = DC(hdc); return d ? d->bk : 0xFFFFFFu; }
+void hle_gdi_select_font(uint32_t hdc, uint32_t font) { dc_t *d = DC(hdc); if (d) d->font = font ? font : SYSTEM_FONT; }
+void hle_gdi_viewport(uint32_t hdc, int x, int y) { dc_t *d = DC(hdc); if (d) d->vox = x, d->voy = y; }
+void hle_gdi_clip(uint32_t hdc, int on, int l, int t, int r, int b) {
+    dc_t *d = DC(hdc);
+    if (!d) return;
+    d->clip = on;
+    if (on) d->cl = l, d->ct = t, d->cr = r, d->cb = b;
+}
+void hle_gdi_fill(uint32_t hdc, int l, int t, int r, int b, uint32_t cr) { rectfill(DC(hdc), l, t, r, b, cr); }
+int hle_gdi_text_out(uint32_t hdc, int x, int y, const char *s) {
+    return s ? text_out_at(DC(hdc), x, y, s, (int)strlen(s)) : 0;
+}
+int hle_gdi_measure(uint32_t hdc, const char *s, int n, int *w, int *h) {
+    dc_t *d = DC(hdc);
+    font_t *f = d ? FONT(d->font) : NULL;
+    TTF_Font *t = ttf_of(f);
+    if (!t || !s) { if (w) *w = 0; if (h) *h = 0; return 0; }
+    if (n < 0) n = (int)strlen(s);
+    char buf[1024];
+    if (n >= (int)sizeof buf) n = sizeof buf - 1;
+    memcpy(buf, s, (size_t)n), buf[n] = 0;
+    int tw = 0, th = 0;
+    if (TTF_SizeText(t, buf, &tw, &th) != 0) return 0;
+    float sx = hscale(f, t);
+    if (w) *w = scaled(tw, sx);
+    if (h) *h = th;
+    return 1;
 }
 static void g_FillRect(void) {                           /* (hdc, &RECT, hbrush) */
     dc_t *d = DC(A32(0)); uint32_t rc = A32(1); gobj_t *b = GOBJ(A32(2));

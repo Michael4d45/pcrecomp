@@ -213,6 +213,10 @@ int         hle_window_screen_rect(uint32_t h, int *l, int *t, int *r, int *b);
 const char *hle_window_class(uint32_t h);
 uint32_t    hle_window_parent(uint32_t h);
 uint32_t    hle_window_style(uint32_t h);
+int         hle_window_visible(uint32_t h);
+uint32_t    hle_window_get(uint32_t h, uint32_t cmd);   /* GetWindow: GW_CHILD 5, NEXT 2, PREV 3 */
+uint32_t    hle_window_font(uint32_t h);
+int         hle_window_client_size(uint32_t h, int *w, int *h_out);
 uint32_t    hle_dialog_item(uint32_t dlg, uint32_t id);
 void        hle_queue_dump(void);              /* the queue, to stderr */
 
@@ -314,6 +318,18 @@ extern void (*hle_gdi_window_hook)(void);              /* called after a blit to
 uint32_t hle_gdi_dib_section(const uint8_t *bmi, uint32_t **bits);   /* CreateDIBSection from the host side */
 uint32_t hle_gdi_make_dib(int w, int h, int bpp, uint8_t *bits, int topdown, const uint32_t *ctab, int ncolors, int is555);
 void     hle_gdi_release_dc(uint32_t hdc);
+/* Host-callable drawing into a surface DC (text-field compose). COLORREFs. */
+void     hle_gdi_set_text_color(uint32_t hdc, uint32_t cr);
+void     hle_gdi_set_bk_color(uint32_t hdc, uint32_t cr);
+void     hle_gdi_set_bk_mode(uint32_t hdc, int mode);          /* 1 transparent, 2 opaque */
+uint32_t hle_gdi_get_text_color(uint32_t hdc);
+uint32_t hle_gdi_get_bk_color(uint32_t hdc);
+void     hle_gdi_select_font(uint32_t hdc, uint32_t font);
+void     hle_gdi_viewport(uint32_t hdc, int x, int y);
+void     hle_gdi_clip(uint32_t hdc, int on, int l, int t, int r, int b);
+void     hle_gdi_fill(uint32_t hdc, int l, int t, int r, int b, uint32_t cr);
+int      hle_gdi_text_out(uint32_t hdc, int x, int y, const char *s);
+int      hle_gdi_measure(uint32_t hdc, const char *s, int n, int *w, int *h);
 extern const win32hle_shim win32hle_user32[];
 extern const win32hle_shim win32hle_winmm[];
 extern const win32hle_shim win32hle_lz32[];          /* LZOpenFileA & co: SZDD expanded in memory (lz32.c) */

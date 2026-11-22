@@ -43,6 +43,13 @@
 #define WM_GETTEXT         0x000Du
 #define WM_GETTEXTLENGTH   0x000Eu
 #define WM_PAINT           0x000Fu
+#define WM_PRINT           0x0317u
+#define WM_CTLCOLOREDIT    0x0133u
+#define PRF_CHECKVISIBLE   0x01u
+#define PRF_NONCLIENT      0x02u
+#define PRF_CLIENT         0x04u
+#define PRF_ERASEBKGND     0x08u
+#define PRF_CHILDREN       0x10u
 #define WM_CLOSE           0x0010u
 #define WM_QUIT            0x0012u
 #define WM_ERASEBKGND      0x0014u
@@ -929,6 +936,46 @@ static uint32_t static_proc(win_t *x, uint32_t m, uint32_t w, uint32_t l) {
     }
 }
 
+/* Paint an EDIT into hdc (client origin). softdd's WM_PRINT compose, and
+ * WM_PAINT when a window surface exists. Parent's WM_CTLCOLOREDIT sets the
+ * colours on the DC; default is white text on black. */
+static void paint_edit(win_t *x, uint32_t hdc) {
+    if (!hdc || !x) return;
+    hle_gdi_set_text_color(hdc, 0x00FFFFFFu);
+    hle_gdi_set_bk_color(hdc, 0x00000000u);
+    hle_gdi_set_bk_mode(hdc, 2);                         /* OPAQUE */
+    if (x->parent) hle_send(x->parent, WM_CTLCOLOREDIT, hdc, x->hwnd);
+    uint32_t ink = hle_gdi_get_text_color(hdc), paper = hle_gdi_get_bk_color(hdc);
+    hle_gdi_fill(hdc, 0, 0, x->w, x->h, paper);
+    if (x->font) hle_gdi_select_font(hdc, x->font);
+    hle_gdi_set_bk_mode(hdc, 1);                         /* TRANSPARENT over the fill */
+    hle_gdi_set_text_color(hdc, ink);
+    int pad = 2;
+    if (x->sel1 > x->sel0) {
+        int s0w = 0, sw = 0, sh = 0;
+        hle_gdi_measure(hdc, x->text, x->sel0, &s0w, &sh);
+        hle_gdi_measure(hdc, x->text + x->sel0, x->sel1 - x->sel0, &sw, &sh);
+        if (sw < 1) sw = 1;
+        hle_gdi_fill(hdc, pad + s0w, 1, pad + s0w + sw, x->h - 1, ink);
+    }
+    hle_gdi_text_out(hdc, pad, 1, x->text);
+    /* Caret: blinking at sel0 (softdd draws it after WM_PRINT). */
+    if (g_focus == x->hwnd) {
+        uint32_t blink = 530;
+        if (!(blink && (hle_ticks_ms() / blink) % 2)) {
+            int cw = 0, ch = 0;
+            hle_gdi_measure(hdc, x->text, x->sel0, &cw, &ch);
+            if (ch < 1) ch = x->h > 4 ? x->h - 4 : x->h;
+            hle_gdi_fill(hdc, pad + cw, 1, pad + cw + 1, 1 + ch, ink);
+        }
+    }
+}
+static void edit_changed(win_t *x) {
+    invalidate(x, 0);
+    /* Typing does not touch the primary; wake the presenter so compose runs. */
+    if (hle_dd_primary_hook) hle_dd_primary_hook();
+}
+
 static uint32_t edit_proc(win_t *x, uint32_t m, uint32_t w, uint32_t l) {
     uint32_t h = x->hwnd;
     switch (m) {
@@ -936,7 +983,7 @@ static uint32_t edit_proc(win_t *x, uint32_t m, uint32_t w, uint32_t l) {
     case WM_SETTEXT:
         def_proc(h, m, w, l);
         x->sel0 = x->sel1 = (int)strlen(x->text);
-        invalidate(x, 0);
+        edit_changed(x);
         notify(x, 0x0300u);                              /* EN_CHANGE */
         return 1;
     case WM_CHAR: {
@@ -954,7 +1001,7 @@ static uint32_t edit_proc(win_t *x, uint32_t m, uint32_t w, uint32_t l) {
         } else {
             return 0;
         }
-        invalidate(x, 0);
+        edit_changed(x);
         notify(x, 0x0400u);                              /* EN_UPDATE */
         notify(x, 0x0300u);                              /* EN_CHANGE */
         return 0;
@@ -966,12 +1013,12 @@ static uint32_t edit_proc(win_t *x, uint32_t m, uint32_t w, uint32_t l) {
         else if (w == 0x24) x->sel0 = x->sel1 = 0;
         else if (w == 0x23) x->sel0 = x->sel1 = n;
         else if (w == 0x2E && x->sel0 < n) { memmove(x->text + x->sel0, x->text + x->sel0 + 1, (size_t)(n - x->sel0)); notify(x, 0x0300u); }
-        invalidate(x, 0);
+        edit_changed(x);
         return 0;
     }
     case WM_LBUTTONDOWN: set_focus(h); return 0;
-    case WM_SETFOCUS: notify(x, 0x0100u); invalidate(x, 0); return 0;   /* EN_SETFOCUS */
-    case WM_KILLFOCUS: notify(x, 0x0200u); invalidate(x, 0); return 0;  /* EN_KILLFOCUS */
+    case WM_SETFOCUS: notify(x, 0x0100u); edit_changed(x); return 0;   /* EN_SETFOCUS */
+    case WM_KILLFOCUS: notify(x, 0x0200u); edit_changed(x); return 0;  /* EN_KILLFOCUS */
     case 0x00B0u:                                        /* EM_GETSEL */
         if (w) MEM32(w) = (uint32_t)x->sel0;
         if (l) MEM32(l) = (uint32_t)x->sel1;
@@ -991,6 +1038,7 @@ static uint32_t edit_proc(win_t *x, uint32_t m, uint32_t w, uint32_t l) {
         x->sel0 += s ? (int)strlen(s) : 0, x->sel1 = x->sel0;
         snprintf(x->text, sizeof x->text, "%s", tmp);
         notify(x, 0x0300u);
+        edit_changed(x);
         return 0;
     }
     case 0x00C5u: x->limit = w ? (int)w : 0x7FFFFFFE; return 0;   /* EM_LIMITTEXT */
@@ -998,7 +1046,15 @@ static uint32_t edit_proc(win_t *x, uint32_t m, uint32_t w, uint32_t l) {
     case 0x00CFu: if (w) x->style |= 0x800u; else x->style &= ~0x800u; return 1;   /* EM_SETREADONLY */
     case 0x00B8u: return 0;                              /* EM_GETMODIFY */
     case 0x00BAu: return 1;                              /* EM_GETLINECOUNT */
-    case WM_PAINT: x->inval = 0; return 0;
+    case WM_PRINT:
+        if (w) paint_edit(x, w);
+        return 0;
+    case WM_PAINT: {
+        uint32_t dc = hle_gdi_window_dc();
+        if (dc) paint_edit(x, dc), hle_gdi_release_dc(dc);
+        x->inval = 0;
+        return 0;
+    }
     default: return def_proc(h, m, w, l);
     }
 }
@@ -2331,6 +2387,45 @@ const char *hle_window_class(uint32_t h) { win_t *x = W(h); return x ? g_cls[x->
 uint32_t hle_window_parent(uint32_t h) { win_t *x = W(h); return x ? (x->parent ? x->parent : x->owner) : 0; }
 uint32_t hle_dialog_item(uint32_t dlg, uint32_t id) { return dlg_item(dlg, id); }
 uint32_t hle_window_style(uint32_t h) { win_t *x = W(h); return x ? x->style : 0; }
+int hle_window_visible(uint32_t h) { win_t *x = W(h); return x && visible(x); }
+uint32_t hle_window_font(uint32_t h) { win_t *x = W(h); return x ? x->font : 0; }
+int hle_window_client_size(uint32_t h, int *w, int *h_out) {
+    win_t *x = W(h);
+    if (!x) return 0;
+    if (w) *w = x->w;
+    if (h_out) *h_out = x->h;
+    return 1;
+}
+uint32_t hle_window_get(uint32_t h, uint32_t cmd) {
+    win_t *x = W(h);
+    uint32_t best = 0;
+    int bseq = 0;
+    if (!x) return 0;
+    switch (cmd) {
+    case 5:                                              /* GW_CHILD */
+        for (int i = 0; i < MAX_WIN; i++)
+            if (g_win[i].used && g_win[i].parent == x->hwnd && (!best || g_win[i].z < bseq))
+                best = g_win[i].hwnd, bseq = g_win[i].z;
+        return best;
+    case 2: case 3:                                      /* GW_HWNDNEXT / PREV */
+        for (int i = 0; i < MAX_WIN; i++) {
+            win_t *s = &g_win[i];
+            if (!s->used || s->parent != x->parent || s == x || (!x->parent && s->parent)) continue;
+            if (cmd == 2 ? s->z > x->z && (!best || s->z < bseq) : s->z < x->z && (!best || s->z > bseq))
+                best = s->hwnd, bseq = s->z;
+        }
+        return best;
+    case 1:                                              /* GW_HWNDLAST among siblings */
+        for (int i = 0; i < MAX_WIN; i++) {
+            win_t *s = &g_win[i];
+            if (!s->used || s->parent != x->parent || (!x->parent && s->parent)) continue;
+            if (!best || s->z > bseq) best = s->hwnd, bseq = s->z;
+        }
+        return best;
+    case 4: return x->owner;
+    default: return 0;
+    }
+}
 
 /* What is waiting in the queue, for a test driver's report. */
 void hle_queue_dump(void) {
