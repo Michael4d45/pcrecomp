@@ -150,6 +150,7 @@ typedef struct {
     int sel_h, drop_h;                   /* a combo box: its selection field, and its height dropped */
     struct item { char *text; uint32_t data; } *items;
     int nitems, citems;
+    int no_hit;                          /* softdd empty region: composed into the frame, not hit-tested */
 } win_t;
 static win_t g_win[MAX_WIN];
 static int g_seq;
@@ -704,7 +705,7 @@ uint32_t hle_window_at(int sx, int sy, int *cx, int *cy) {
     int bd = -1, bseq = 0;
     for (int i = 0; i < MAX_WIN; i++) {
         win_t *x = &g_win[i];
-        if (!x->used || !visible(x) || (x->style & WS_DISABLED) || x->kind == K_STATIC) continue;
+        if (!x->used || !visible(x) || (x->style & WS_DISABLED) || x->kind == K_STATIC || x->no_hit) continue;
         int ox, oy;
         origin(x, &ox, &oy);
         if (sx < ox || sy < oy || sx >= ox + x->w || sy >= oy + x->h) continue;
@@ -726,6 +727,25 @@ void (*hle_input_hook)(void);                           /* the input state chang
  * relative axes read it. A cursor that moves counts; one put somewhere
  * (SetCursorPos, hle_input_cursor) does not, as on Windows. */
 static int g_raw_x, g_raw_y;
+/* A composed EDIT (no_hit) is skipped by hle_window_at so game-drawn OK
+ * buttons work; a click that lands in its rect still goes to the control
+ * (softdd's click_child). */
+static uint32_t click_no_hit(int sx, int sy, int *cx, int *cy) {
+    win_t *best = NULL;
+    int bd = -1, bseq = 0;
+    for (int i = 0; i < MAX_WIN; i++) {
+        win_t *x = &g_win[i];
+        int ox, oy, d;
+        if (!x->used || !x->no_hit || !visible(x) || (x->style & WS_DISABLED)) continue;
+        origin(x, &ox, &oy);
+        if (sx < ox || sy < oy || sx >= ox + x->w || sy >= oy + x->h) continue;
+        d = depth_of(x);
+        if (d > bd || (d == bd && x->seq > bseq)) best = x, bd = d, bseq = x->seq;
+    }
+    if (!best) return 0;
+    if (cx) { int ox, oy; origin(best, &ox, &oy); *cx = sx - ox, *cy = sy - oy; }
+    return best->hwnd;
+}
 void hle_input_mouse(uint32_t message, int sx, int sy) {
     g_raw_x += sx - g_cursor_x, g_raw_y += sy - g_cursor_y;
     g_cursor_x = sx, g_cursor_y = sy;
@@ -741,6 +761,17 @@ void hle_input_mouse(uint32_t message, int sx, int sy) {
         t = g_capture, cx = sx - ox, cy = sy - oy;
     } else {
         t = hle_window_at(sx, sy, &cx, &cy);
+        if ((message == WM_LBUTTONDOWN || message == WM_LBUTTONDBLCLK)) {
+            int ex, ey;
+            uint32_t e = click_no_hit(sx, sy, &ex, &ey);
+            if (e) {
+                set_focus(e);
+                q_push(e, message, mk_state(), ((uint32_t)(ey & 0xFFFF) << 16) | (uint32_t)(ex & 0xFFFF));
+                q_push(e, WM_LBUTTONUP, 0, ((uint32_t)(ey & 0xFFFF) << 16) | (uint32_t)(ex & 0xFFFF));
+                if (hle_input_hook) hle_input_hook();
+                return;
+            }
+        }
     }
     /* DirectInput hears of it whether or not a window is there to message
      * (a game reading the mouse before its window, or over none of it) */
@@ -2389,6 +2420,7 @@ uint32_t hle_dialog_item(uint32_t dlg, uint32_t id) { return dlg_item(dlg, id); 
 uint32_t hle_window_style(uint32_t h) { win_t *x = W(h); return x ? x->style : 0; }
 int hle_window_visible(uint32_t h) { win_t *x = W(h); return x && visible(x); }
 uint32_t hle_window_font(uint32_t h) { win_t *x = W(h); return x ? x->font : 0; }
+void hle_window_set_no_hit(uint32_t h, int on) { win_t *x = W(h); if (x) x->no_hit = on != 0; }
 int hle_window_client_size(uint32_t h, int *w, int *h_out) {
     win_t *x = W(h);
     if (!x) return 0;

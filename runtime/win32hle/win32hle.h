@@ -217,6 +217,7 @@ int         hle_window_visible(uint32_t h);
 uint32_t    hle_window_get(uint32_t h, uint32_t cmd);   /* GetWindow: GW_CHILD 5, NEXT 2, PREV 3 */
 uint32_t    hle_window_font(uint32_t h);
 int         hle_window_client_size(uint32_t h, int *w, int *h_out);
+void        hle_window_set_no_hit(uint32_t h, int on);  /* softdd empty region: keep keys, skip hit-test */
 uint32_t    hle_dialog_item(uint32_t dlg, uint32_t id);
 void        hle_queue_dump(void);              /* the queue, to stderr */
 
