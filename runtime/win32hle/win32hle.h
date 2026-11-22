@@ -299,6 +299,9 @@ extern const win32hle_shim win32hle_module[];         /* modules, resources, cur
 extern const win32hle_shim win32hle_gdi32[];
 extern const win32hle_shim win32hle_gdidc[];          /* DCs, fonts, text (SDL2_ttf) */
 uint32_t hle_gdi_surface_dc(uint8_t *px, int w, int h, int pitch, int bpp);   /* a DC drawing into those pixels */
+/* Same, with an optional 256-entry DirectDraw palette (PALETTEENTRY as uint32).
+ * 8bpp text and brushes match against it; NULL keeps the grey-ramp fallback. */
+uint32_t hle_gdi_surface_dc_pal(uint8_t *px, int w, int h, int pitch, int bpp, const uint32_t *pe256);
 /* A GDI game's screen: the pixels its window DCs (GetDC, BeginPaint) draw
  * into, at the display mode's size; screen.c shows them when there is no
  * DirectDraw primary. seq changes when they may have. */

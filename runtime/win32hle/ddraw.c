@@ -643,12 +643,18 @@ static void sf_GetColorKey(void) {                       /* (this, flags, &key) 
     MEM32(A32(2)) = s->ck_lo, MEM32(A32(2) + 4) = s->ck_hi;
     RET(DD_OK, 3);
 }
-/* A DC on a surface: GDI text drawn into its pixels (gdidc.c). */
+/* A DC on a surface: GDI text drawn into its pixels (gdidc.c). Pass the
+ * surface's palette, else the primary's, so 8bpp TextOut hits the right
+ * indices (softdd's sync_dib_palette). */
 static void sf_GetDC(void) {
     ACCESS();
     surf_t *s = S(A32(0));
     TOUCH(s);
-    if (A32(1)) MEM32(A32(1)) = hle_gdi_surface_dc(s->px, s->w, s->h, s->pitch, s->bpp);
+    if (A32(1)) {
+        uint32_t pal = s->palette ? s->palette : (g_primary && g_primary->palette ? g_primary->palette : 0);
+        const uint32_t *pe = pal ? P(pal)->entries : NULL;
+        MEM32(A32(1)) = hle_gdi_surface_dc_pal(s->px, s->w, s->h, s->pitch, s->bpp, pe);
+    }
     RET(DD_OK, 2);
 }
 static void sf_GetOverlayPosition(void) { RET(DDERR_UNSUPPORTED, 3); }

@@ -33,6 +33,7 @@ typedef struct {
     int bkmode, align, wox, woy, vox, voy, cpx, cpy;
     int win, is555;                                      /* draws into the window surface; 16bpp is 5-5-5 */
     const uint32_t *ctab;                                /* an 8bpp DIB's colour table, 0x00RRGGBB */
+    uint32_t ctab_buf[256];                              /* surface GetDC: a copy of the DD palette as RRGGBB */
     uint32_t bmp;                                        /* the bitmap selected into it */
     int clip, cl, ct, cr, cb;                            /* SelectClipRgn's rectangle, in pixels */
 } dc_t;
@@ -60,9 +61,23 @@ static uint32_t new_dc(void) {
     return 0;
 }
 uint32_t hle_gdi_surface_dc(uint8_t *px, int w, int h, int pitch, int bpp) {
+    return hle_gdi_surface_dc_pal(px, w, h, pitch, bpp, NULL);
+}
+/* pe: 256 PALETTEENTRYs (peRed, peGreen, peBlue, peFlags as a uint32 each), or
+ * NULL. An 8bpp surface DC needs them so TextOut matches white/colours to the
+ * game's palette instead of a grey ramp (softdd's sync_dib_palette). */
+uint32_t hle_gdi_surface_dc_pal(uint8_t *px, int w, int h, int pitch, int bpp, const uint32_t *pe) {
     uint32_t d = new_dc();
     dc_t *x = DC(d);
-    if (x) x->px = px, x->w = w, x->h = h, x->pitch = pitch, x->bpp = bpp;
+    if (!x) return d;
+    x->px = px, x->w = w, x->h = h, x->pitch = pitch, x->bpp = bpp;
+    if (bpp == 8 && pe) {
+        for (int i = 0; i < 256; i++) {
+            uint32_t e = pe[i];
+            x->ctab_buf[i] = (e & 0xFFu) << 16 | (e >> 8 & 0xFFu) << 8 | (e >> 16 & 0xFFu);
+        }
+        x->ctab = x->ctab_buf;
+    }
     return d;
 }
 void hle_gdi_release_dc(uint32_t h) { dc_t *x = DC(h); if (x) x->used = 0; }
@@ -675,11 +690,24 @@ static uint32_t to_rgb(const dc_t *d, uint32_t v) {
 static uint32_t from_rgb(const dc_t *d, uint32_t c) {
     uint32_t r = c >> 16 & 0xFF, g = c >> 8 & 0xFF, b = c & 0xFF;
     if (d->bpp == 16) return d->is555 ? (r >> 3) << 10 | (g >> 3) << 5 | (b >> 3) : (r >> 3) << 11 | (g >> 2) << 5 | (b >> 3);
-    if (d->bpp == 8) return (r * 77 + g * 151 + b * 28) >> 8;      /* ponytail: grey; nothing blits into an 8bpp DIB yet */
+    if (d->bpp == 8) {
+        if (!d->ctab) return (r * 77 + g * 151 + b * 28) >> 8;   /* no table: grey ramp */
+        /* Nearest palette entry (softdd / real DD surface DCs). Cached per
+         * (ctab identity, colour) would help; menus redraw rarely. */
+        int best = 0, bestd = 1 << 30;
+        for (int i = 0; i < 256; i++) {
+            int cr = (int)(d->ctab[i] >> 16 & 0xFF), cg = (int)(d->ctab[i] >> 8 & 0xFF), cb = (int)(d->ctab[i] & 0xFF);
+            int dr = cr - (int)r, dg = cg - (int)g, db = cb - (int)b;
+            int dist = dr * dr + dg * dg + db * db;
+            if (dist < bestd) { bestd = dist; best = i; if (!dist) break; }
+        }
+        return (uint32_t)best;
+    }
     return c;
 }
 static uint32_t mix(const dc_t *d, uint32_t under, uint32_t over, int a) {
     if (a >= 255) return over;
+    if (d->bpp == 8) return a >= 128 ? over : under;     /* indices are not RGB; no blend */
     if (d->bpp == 16) {
         int r = ((under >> 11) * (255 - a) + (over >> 11) * a) / 255;
         int g = (((under >> 5) & 63) * (255 - a) + ((over >> 5) & 63) * a) / 255;
@@ -754,7 +782,7 @@ static uint8_t *text_ink(const font_t *f, TTF_Font *t, const char *buf, int n, i
 static void g_TextOutA(void) {                           /* (hdc, x, y, text, n) */
     dc_t *d = DC(A32(0));
     int n = (int)A32(4);
-    if (!d || !d->px || n <= 0 || (d->bpp != 16 && d->bpp != 32)) RET(1, 5);
+    if (!d || !d->px || n <= 0 || (d->bpp != 8 && d->bpp != 16 && d->bpp != 32)) RET(1, 5);
     font_t *f = FONT(d->font);
     TTF_Font *t = ttf_of(f);
     if (!t) RET(1, 5);
