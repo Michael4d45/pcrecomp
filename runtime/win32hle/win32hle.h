@@ -123,6 +123,9 @@ uint32_t hle_resolve_or_stub(const char *name);
 
 /* Human name for a synthetic shim VA (for traces/faults), or NULL. */
 const char *hle_name(uint32_t va);
+/* The host's answer for an address before the dispatch table (host_lite.c):
+ * a replacement for a lifted function reached indirectly; NULL: none. */
+extern recomp_func_t (*hle_lookup_manual_hook)(uint32_t va);
 /* called when guest memory runs out (the heap or pages): a host's log may
  * want to know */
 extern void (*hle_on_alloc_fail)(const char *what, uint32_t n);

@@ -253,7 +253,13 @@ recomp_func_t recomp_lookup(uint32_t va) {
     }
     return NULL;
 }
-recomp_func_t recomp_lookup_manual(uint32_t va) { (void)va; return NULL; }
+/* A host's own answers for some guest addresses, asked before the dispatch
+ * table (native32 hosts define recomp_lookup_manual themselves): a game
+ * function the host replaces or wraps when it is reached indirectly (a vtable
+ * slot). With RECOMP_RESOLVE_CACHE an answer is cached, so it must depend on
+ * the address alone. */
+recomp_func_t (*hle_lookup_manual_hook)(uint32_t va);
+recomp_func_t recomp_lookup_manual(uint32_t va) { return hle_lookup_manual_hook ? hle_lookup_manual_hook(va) : NULL; }
 
 /* --------------------------------------------------------- shim registry
  * Each shim gets a synthetic VA in a reserved range that no real image uses. */
