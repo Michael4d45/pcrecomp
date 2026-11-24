@@ -788,10 +788,14 @@ void hle_input_key(int down, uint32_t vk, uint32_t scan) {
     uint32_t t = hle_focus_window();
     int alt = (g_keys[VK_MENU] & 0x80) != 0;
     /* Genie's New Player (and similar) EDIT is subclassed and eats VK_RETURN
-     * without accepting the dialog. A real click on OK works; turn Enter into
-     * that click for a single-line field (ES_MULTILINE keeps the key). */
+     * without accepting the dialog. A real click on OK works. HLE_EDIT_ENTER_CLICK=1
+     * turns Enter into that click for a single-line field (ES_MULTILINE keeps the
+     * key). Off by default: the same subclass is the in-game chat line, whose
+     * Enter sends the text (and the cheats), and the click went to the map. */
     win_t *fe = W(t);
-    if (down && vk == VK_RETURN && fe && fe->kind == K_EDIT && !(fe->style & 4u) && visible(fe)) {
+    static int enter_click = -1;
+    if (enter_click < 0) { const char *e = getenv("HLE_EDIT_ENTER_CLICK"); enter_click = e && *e && *e != '0'; }
+    if (enter_click && down && vk == VK_RETURN && fe && fe->kind == K_EDIT && !(fe->style & 4u) && visible(fe)) {
         int ox, oy;
         origin(fe, &ox, &oy);
         int cx = ox - 20, cy = oy + fe->h + 45;          /* OK under Genie name dialogs */
