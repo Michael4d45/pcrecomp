@@ -488,6 +488,12 @@ static void destroy(uint32_t h) {
     uncover(x);
     for (int i = 0; i < MAX_WIN; i++)                    /* owned windows and children first */
         if (g_win[i].used && (g_win[i].parent == h || g_win[i].owner == h)) destroy(g_win[i].hwnd);
+    /* The focus leaves first, as DestroyWindow takes it: the window is told
+     * (WM_KILLFOCUS), and a child's parent gets it. Galactic Battlegrounds'
+     * chat line is an EDIT in a dialog panel the game deletes on Enter: told
+     * nothing, its panel kept the game screen's input and the game stopped
+     * drawing the map. */
+    if (g_focus == h) set_focus(x->parent && W(x->parent) ? x->parent : 0);
     hle_send(h, WM_DESTROY, 0, 0);
     hle_send(h, WM_NCDESTROY, 0, 0);
     x = W(h);
