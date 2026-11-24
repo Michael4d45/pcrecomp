@@ -32,7 +32,10 @@
 #define DDERR_UNSUPPORTED       0x80004001u
 #define DDERR_NOTFOUND          0x887600FFu
 #define DDERR_NOPALETTEATTACHED 0x8876023Cu
-#define DDERR_NOCLIPPERATTACHED 0x88760082u
+/* MAKE_DDHRESULT(568). The game treats any other GetClipper failure as fatal
+ * and returns before BltFast of its own cursor (sub_0049F080 / sub_0049F630).
+ * 0x88760082 is DDERR_INVALIDOBJECT, which aborted that draw. */
+#define DDERR_NOCLIPPERATTACHED 0x88760238u
 #define DDERR_NOCOLORKEY        0x887600D7u
 #define DDERR_NOTLOCKED         0x887602ACu
 #define DDERR_GENERIC           0x80004005u
