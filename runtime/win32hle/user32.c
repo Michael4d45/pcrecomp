@@ -791,26 +791,12 @@ void hle_input_key(int down, uint32_t vk, uint32_t scan) {
     if (vk == 0xA0 || vk == 0xA1) { if (down) g_keys[VK_SHIFT] |= 0x80; else g_keys[VK_SHIFT] &= 1; }
     if (vk == 0xA2 || vk == 0xA3) { if (down) g_keys[VK_CONTROL] |= 0x80; else g_keys[VK_CONTROL] &= 1; }
     if (vk == 0xA4 || vk == 0xA5) { if (down) g_keys[VK_MENU] |= 0x80; else g_keys[VK_MENU] &= 1; }
+    /* Enter, like every key, goes to the focus as WM_KEYDOWN, as on Windows: a
+     * game that wants Enter in a text field takes it there (Galactic
+     * Battlegrounds' EDIT subclass, 0x004C8E50, sends its panel the "enter"
+     * action: New Player's OK, the chat's send). */
     uint32_t t = hle_focus_window();
     int alt = (g_keys[VK_MENU] & 0x80) != 0;
-    /* Genie's New Player (and similar) EDIT is subclassed and eats VK_RETURN
-     * without accepting the dialog. A real click on OK works. HLE_EDIT_ENTER_CLICK=1
-     * turns Enter into that click for a single-line field (ES_MULTILINE keeps the
-     * key). Off by default: the same subclass is the in-game chat line, whose
-     * Enter sends the text (and the cheats), and the click went to the map. */
-    win_t *fe = W(t);
-    static int enter_click = -1;
-    if (enter_click < 0) { const char *e = getenv("HLE_EDIT_ENTER_CLICK"); enter_click = e && *e && *e != '0'; }
-    if (enter_click && down && vk == VK_RETURN && fe && fe->kind == K_EDIT && !(fe->style & 4u) && visible(fe)) {
-        int ox, oy;
-        origin(fe, &ox, &oy);
-        int cx = ox - 20, cy = oy + fe->h + 45;          /* OK under Genie name dialogs */
-        if (cx < 0) cx = ox + fe->w / 4;
-        if (cy >= g_screen_h) cy = oy + fe->h + 20;
-        hle_input_mouse(WM_LBUTTONDOWN, cx, cy);
-        hle_input_mouse(WM_LBUTTONUP, cx, cy);
-        return;
-    }
     /* The keys Windows marks extended (bit 24): without it a game reading
      * the scan code takes Delete for the keypad's ".", the arrows for its
      * 8 4 6 2, Home for its 7 (Theme Park World's Delete, its clear-land tool). */
@@ -1042,7 +1028,9 @@ static void edit_changed(win_t *x) {
 static uint32_t edit_proc(win_t *x, uint32_t m, uint32_t w, uint32_t l) {
     uint32_t h = x->hwnd;
     switch (m) {
-    case WM_GETDLGCODE: return 0x1u | 0x2u | 0x80u | (x->style & 4u ? 0x4u : 0);   /* WANTARROWS|WANTTAB? no: CHARS|HASSETSEL */
+    /* Windows' EDIT: DLGC_WANTARROWS | DLGC_HASSETSEL | DLGC_WANTCHARS, and
+     * DLGC_WANTALLKEYS for ES_MULTILINE (its Enter is a new line) */
+    case WM_GETDLGCODE: return 0x1u | 0x8u | 0x80u | (x->style & 4u ? 0x4u : 0);
     case WM_SETTEXT:
         def_proc(h, m, w, l);
         x->sel0 = x->sel1 = (int)strlen(x->text);
@@ -1052,6 +1040,11 @@ static uint32_t edit_proc(win_t *x, uint32_t m, uint32_t w, uint32_t l) {
     case WM_CHAR: {
         size_t n = strlen(x->text);
         if (x->style & 0x800u) return 0;                 /* ES_READONLY */
+        /* A control character other than Backspace (Enter's '\r', Escape,
+         * Tab, Ctrl+letter) types nothing in a single-line EDIT: Windows beeps
+         * and leaves the text and the selection as they are. Taking it as a
+         * typed character replaced a selected name with nothing. */
+        if (w < 32 && w != 8) return 0;
         if (x->sel1 > x->sel0) {                         /* replace the selection */
             memmove(x->text + x->sel0, x->text + x->sel1, n - (size_t)x->sel1 + 1);
             n = strlen(x->text), x->sel1 = x->sel0;
