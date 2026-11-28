@@ -60,9 +60,11 @@ static dsbuf *g_buf[MAX_BUFS];
 static SDL_AudioDeviceID g_dev;
 static int g_audio_ok = -1;
 static float g_master = 1.0f;
+static float g_buffer_gain = 1.0f;   /* on the buffers alone: a host's own streams (music, films) keep theirs */
 static uint64_t g_mix_at;       /* when the last mix ran (SDL's counter) */
 static int g_mix_frames;        /* ...and how many output frames it made */
 void hle_dsound_set_master(float gain) { g_master = gain; }
+void hle_dsound_set_buffer_gain(float gain) { g_buffer_gain = gain; }
 static dsbuf *buf_of(uint32_t self);
 int hle_dsound_buffer_gains(uint32_t buffer, float *l, float *r) {
     pthread_mutex_lock(&g_mix);
@@ -175,8 +177,8 @@ static void mix(void *ud, Uint8 *stream, int len) {
                 else { b->playing = 0; b->pos = 0; break; }
             }
             float l = sample(b, at, 0), r = b->channels > 1 ? sample(b, at, 1) : l;
-            acc[2 * f] += l * b->gl;
-            acc[2 * f + 1] += r * b->gr;
+            acc[2 * f] += l * b->gl * g_buffer_gain;
+            acc[2 * f + 1] += r * b->gr * g_buffer_gain;
             b->pos += step;
         }
     }
